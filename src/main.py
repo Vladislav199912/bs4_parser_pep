@@ -82,53 +82,60 @@ def download(session):
     downloads_dir = BASE_DIR / 'downloads'
     downloads_dir.mkdir(exist_ok=True)
     archive_path = downloads_dir / filename
-    response = session.get(pdf_a4_link)
-    with open(archive_path, 'wb') as file:
-        file.write(response.content)
-    logging.info(f'Архив был загружен и сохранён: {archive_path}')
+    download = session.get(pdf_a4_link)
+    with open(archive_path, mode='wb') as file:
+        file.write(download.content)
+    logging.info(f"Архив был загружен и сохранён: {archive_path}")
 
 
 def pep(session):
-    result = PEP_TABLE
-    status_sum = {}
-    total_pep = 0
-    response = get_response(session, PEP)
-    if response is None:
-        return
+    response = get_response(session, PEP_TABLE)
+    result = [('Статус', 'Количество')]
     soup = BeautifulSoup(response.text, features='lxml')
-    num_tag = find_tag(soup, 'section', {'id': 'numerical-index'})
-    tbody_tag = find_tag(num_tag, 'tbody')
-    tr_tags = tbody_tag.find_all('tr')
-    for tr_tag in tqdm(tr_tags):
-        td_tag = find_tag(tr_tag, 'td')
-        preview_status = td_tag.text[1:]
-        a_tag = find_tag(tr_tag, 'a')
-        href = a_tag['href']
-        pep_link = urljoin(PEP, href)
-        response = get_response(session, pep_link)
-        if response is None:
-            return
+    all_tables = soup.find('section', id='numerical-index')
+    all_tables = all_tables.find_all('tr')
+    pep_count = 0
+    status_count = {}
+    for table in tqdm(all_tables, desc='Parsing'):
+        rows = table.find_all('td')
+        all_status = None
+        link = None
+        for i, row in enumerate(rows):
+            if i == 0 and len(row.text) == 2:
+                all_status = row.text[1]
+                continue
+            if i == 1:
+                link_tag = find_tag(row, 'a')
+                link = link_tag['href']
+                break
+        link = urljoin(PEP, link)
+        response = get_response(session, link)
         soup = BeautifulSoup(response.text, features='lxml')
-        dt_tags = soup.find_all('dt')
-        for dt in dt_tags:
-            if dt.text == 'Status:':
-                total_pep += 1
-                status = dt.find_next_sibling().string
-                if status in status_sum:
-                    status_sum[status] += 1
-                if status not in status_sum:
-                    status_sum[status] = 1
-                if status not in EXPECTED_STATUS[preview_status]:
-                    error_msg = (
-                        'Несовпадающие статусы:\n'
-                        f'{pep_link}\n'
-                        f'Статус в картрочке {status}\n'
-                        f'Ожидаемые статусы: {EXPECTED_STATUS[preview_status]}'
-                    )
-                    logging.warning(error_msg)
-    for status in status_sum:
-        result.append((status, status_sum[status]))
-    result.append(('Total', total_pep))
+        dl = find_tag(soup, 'dl', attrs={'class': 'rfc2822 field-list simple'})
+        pattern = (
+                r'.*(?P<status>Active|Draft|Final|Provisional|Rejected|'
+                r'Superseded|Withdrawn|Deferred|April Fool!|Accepted)'
+            )
+        re_text = re.search(pattern, dl.text)
+        status = None
+        if re_text:
+            status = re_text.group('status')
+        if all_status and EXPECTED_STATUS.get(all_status) != status:
+            logging.info(
+                f'Несовпадающие статусы:\n{link}\n'
+                f'Статус в карточке: {status}\n'
+                f'Ожидаемый статус: {EXPECTED_STATUS[all_status]}'
+            )
+        if not all_status and status not in ('Active', 'Draft'):
+            logging.info(
+                f'Несовпадающие статусы:\n{link}\n'
+                f'Статус в карточке: {status}\n'
+                f'Ожидаемые статусы: ["Active", "Draft"]'
+            )
+        pep_count += 1
+        status_count[status] += 1
+    result.extend(status_count.items())
+    result.append(('Total', pep_count))
     return result
 
 
