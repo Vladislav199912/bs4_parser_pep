@@ -91,6 +91,8 @@ def download(session):
     archive_url = urljoin(DOWNLOADS_URL, pdf_a4_link)
     filename = archive_url.split('/')[-1]
     response = session.get(archive_url)
+    if response is None:
+        return
     downloads_dir = BASE_DIR / DOWNLOADS_DIR
     downloads_dir.mkdir(exist_ok=True)
     with open(downloads_dir / filename, 'wb') as file:
