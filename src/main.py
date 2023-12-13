@@ -1,15 +1,31 @@
 import logging
 import re
 from urllib.parse import urljoin
+from collections import defaultdict
 
 import requests_cache
 from bs4 import BeautifulSoup
 from configs import configure_argument_parser, configure_logging
 from constants import (BASE_DIR, EXPECTED_STATUS, LATEST_VERSIONS_RESULT_TABLE,
-                       MAIN_DOC_URL, PEP, PEP_TABLE, WHATS_NEW_RESULT_TABLE)
+                       MAIN_DOC_URL, PEP, WHATS_NEW_RESULT_TABLE,
+                       DOWNLOADS_DIR, DOWNLOADS_URL, DOWNLOAD_COMPLETE_FORMAT)
 from outputs import control_output
 from tqdm import tqdm
-from utils import find_tag, get_response
+from utils import find_tag, get_response, cook_soup, get_soup
+
+PARSER_ERROR = ('Сбой в работе программы: {error}')
+INCONGRUITY_STATUSES_FORMAT = (
+    '{packet_url}'
+    ' Статус в карточке: {card_status} '
+    'Ожидаемые статусы: {expected}'
+)
+STATUS_MISSMATCH_ERROR = (
+    'Несовпадающие статусы:\n'
+    '{pep_link}\n'
+    'Статус в картрочке {status}\n'
+    'Ожидаемые статусы: {preview_status}'
+)
+FILE_UPLOAD_LOG = ('Архив был загружен и сохранён: {archive_path}')
 
 
 def whats_new(session):
@@ -68,75 +84,64 @@ def latest_versions(session):
 
 
 def download(session):
-    downloads_url = urljoin(MAIN_DOC_URL, 'download.html')
-    response = get_response(session, downloads_url)
-    if response is None:
-        return
-    soup = BeautifulSoup(response.text, features='lxml')
-    main_div = find_tag(soup, 'table', attrs={'class': 'docutils'})
-    pdf_a4_tag = find_tag(
-        main_div, 'a', attrs={'href': re.compile(r'.+pdf-a4\.zip$')}
-    )
-    pdf_a4_link = urljoin(downloads_url, pdf_a4_tag['href'])
-    filename = pdf_a4_link.split('/')[-1]
-    downloads_dir = BASE_DIR / 'downloads'
+    soup = get_soup(session, DOWNLOADS_URL)
+    pdf_a4_link = soup.select_one('table.docutils a[href$="pdf-a4.zip"]')[
+        'href'
+    ]
+    archive_url = urljoin(DOWNLOADS_URL, pdf_a4_link)
+    filename = archive_url.split('/')[-1]
+    response = session.get(archive_url)
+    downloads_dir = BASE_DIR / DOWNLOADS_DIR
     downloads_dir.mkdir(exist_ok=True)
-    archive_path = downloads_dir / filename
-    download = session.get(pdf_a4_link)
-    with open(archive_path, mode='wb') as file:
-        file.write(download.content)
-    logging.info(f"Архив был загружен и сохранён: {archive_path}")
+    with open(downloads_dir / filename, 'wb') as file:
+        file.write(response.content)
+    logging.info(DOWNLOAD_COMPLETE_FORMAT.format(archive_path=downloads_dir))
 
 
 def pep(session):
-    response = get_response(session, PEP_TABLE)
-    result = [('Статус', 'Количество')]
-    soup = BeautifulSoup(response.text, features='lxml')
-    all_tables = soup.find('section', id='numerical-index')
-    all_tables = all_tables.find_all('tr')
-    pep_count = 0
-    status_count = {}
-    for table in tqdm(all_tables, desc='Parsing'):
-        rows = table.find_all('td')
-        all_status = None
-        link = None
-        for i, row in enumerate(rows):
-            if i == 0 and len(row.text) == 2:
-                all_status = row.text[1]
-                continue
-            if i == 1:
-                link_tag = find_tag(row, 'a')
-                link = link_tag['href']
-                break
-        link = urljoin(PEP, link)
-        response = get_response(session, link)
-        soup = BeautifulSoup(response.text, features='lxml')
-        dl = find_tag(soup, 'dl', attrs={'class': 'rfc2822 field-list simple'})
-        pattern = (
-                r'.*(?P<status>Active|Draft|Final|Provisional|Rejected|'
-                r'Superseded|Withdrawn|Deferred|April Fool!|Accepted)'
+    soup = cook_soup(session, PEP)
+    section_block = find_tag(soup, 'section', attrs={'id': 'numerical-index'})
+    table = find_tag(section_block, 'tbody')
+    status_sum = defaultdict()
+    logs = []
+    for table_line in tqdm(table.find_all('tr')):
+        main_table_status = find_tag(table_line, 'td').text[1:]
+        url = find_tag(table_line, 'a').get('href')
+        packet_url = urljoin(PEP, url)
+        try:
+            packet_soup = cook_soup(session, packet_url)
+            packet_info = find_tag(
+                packet_soup, 'dl', attrs={'class': 'rfc2822 field-list simple'}
             )
-        re_text = re.search(pattern, dl.text)
-        status = None
-        if re_text:
-            status = re_text.group('status')
-        if all_status and EXPECTED_STATUS.get(all_status) != status:
-            logging.info(
-                f'Несовпадающие статусы:\n{link}\n'
-                f'Статус в карточке: {status}\n'
-                f'Ожидаемый статус: {EXPECTED_STATUS[all_status]}'
+            card_status = (
+                packet_info.find(text=re.compile('Status.*'))
+                .parent.find_next_sibling()
+                .text
             )
-        if not all_status and status not in ('Active', 'Draft'):
-            logging.info(
-                f'Несовпадающие статусы:\n{link}\n'
-                f'Статус в карточке: {status}\n'
-                f'Ожидаемые статусы: ["Active", "Draft"]'
+            expected = EXPECTED_STATUS.get(main_table_status)
+            if card_status not in expected:
+                logs.append(
+                    INCONGRUITY_STATUSES_FORMAT.format(
+                        packet_url=packet_url,
+                        card_status=card_status,
+                        expected=expected,
+                    )
+                )
+            packet_status = (
+                packet_info.find(text=re.compile('Status.*'))
+                .parent.find_next_sibling()
+                .text
             )
-        pep_count += 1
-        status_count[status] += 1
-    result.extend(status_count.items())
-    result.append(('Total', pep_count))
-    return result
+            status_sum[packet_status] += 1
+        except ConnectionError as error:
+            logs.append(error)
+    for log in logs:
+        logging.info(log)
+    return [
+        ('Статус', 'Количество'),
+        *status_sum.items(),
+        ('Итого', sum(status_sum.values())),
+    ]
 
 
 MODE_TO_FUNCTION = {
@@ -153,13 +158,17 @@ def main():
     arg_parser = configure_argument_parser(MODE_TO_FUNCTION.keys())
     args = arg_parser.parse_args()
     logging.info(f'Аргументы командной строки: {args}')
-    session = requests_cache.CachedSession()
-    if args.clear_cache:
-        session.cache.clear()
-    parser_mode = args.mode
-    results = MODE_TO_FUNCTION[parser_mode](session)
-    if results is not None:
-        control_output(results, args)
+    try:
+        session = requests_cache.CachedSession()
+        if args.clear_cache:
+            session.cache.clear()
+        parser_mode = args.mode
+        results = MODE_TO_FUNCTION[parser_mode](session)
+        if results is not None:
+            control_output(results, args)
+    except Exception as error:
+        error_msg = PARSER_ERROR.format(error=error)
+        logging.error(error_msg, exc_info=True)
     logging.info('Парсер завершил работу.')
 
 
