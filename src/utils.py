@@ -1,5 +1,4 @@
 import logging
-from bs4 import BeautifulSoup
 from exceptions import ParserFindTagException
 from requests import RequestException
 
@@ -23,13 +22,3 @@ def find_tag(soup, tag, attrs=None):
         logging.error(error_msg, stack_info=True)
         raise ParserFindTagException(error_msg)
     return searched_tag
-
-
-def cook_soup(session, url, encoding='UTF-8', features='lxml'):
-    return BeautifulSoup(
-        get_response(session, url, encoding).text, features=features
-    )
-
-
-def get_soup(session, url):
-    return BeautifulSoup(get_response(session, url).text, features='lxml')

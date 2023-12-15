@@ -8,10 +8,11 @@ from bs4 import BeautifulSoup
 from configs import configure_argument_parser, configure_logging
 from constants import (BASE_DIR, EXPECTED_STATUS, LATEST_VERSIONS_RESULT_TABLE,
                        MAIN_DOC_URL, PEP, WHATS_NEW_RESULT_TABLE,
-                       DOWNLOADS_DIR, DOWNLOADS_URL, DOWNLOAD_COMPLETE_FORMAT)
+                       DOWNLOADS_DIR, DOWNLOADS_URL,
+                       DOWNLOAD_COMPLETE_FORMAT, PEP_TABLE)
 from outputs import control_output
 from tqdm import tqdm
-from utils import find_tag, get_response, cook_soup, get_soup
+from utils import find_tag, get_response
 
 PARSER_ERROR = ('Сбой в работе программы: {error}')
 INCONGRUITY_STATUSES_FORMAT = (
@@ -84,7 +85,8 @@ def latest_versions(session):
 
 
 def download(session):
-    soup = get_soup(session, DOWNLOADS_URL)
+    response = get_response(session, DOWNLOADS_URL)
+    soup = BeautifulSoup(response.text, features='lxml')
     pdf_a4_link = soup.select_one('table.docutils a[href$="pdf-a4.zip"]')[
         'href'
     ]
@@ -101,49 +103,52 @@ def download(session):
 
 
 def pep(session):
-    soup = cook_soup(session, PEP)
-    section_block = find_tag(soup, 'section', attrs={'id': 'numerical-index'})
-    table = find_tag(section_block, 'tbody')
+    response = get_response(session, PEP_TABLE)
+    result = [('Статус', 'Количество')]
+    soup = BeautifulSoup(response.text, features='lxml')
+    all_tables = soup.find('section', id='numerical-index')
+    all_tables = all_tables.find_all('tr')
     status_sum = defaultdict()
-    logs = []
-    for table_line in tqdm(table.find_all('tr')):
-        main_table_status = find_tag(table_line, 'td').text[1:]
-        url = find_tag(table_line, 'a').get('href')
-        packet_url = urljoin(PEP, url)
-        try:
-            packet_soup = cook_soup(session, packet_url)
-            packet_info = find_tag(
-                packet_soup, 'dl', attrs={'class': 'rfc2822 field-list simple'}
+    for table in tqdm(all_tables, desc='Parsing'):
+        rows = table.find_all('td')
+        all_status = None
+        link = None
+        for i, row in enumerate(rows):
+            if i == 0 and len(row.text) == 2:
+                all_status = row.text[1]
+                continue
+            if i == 1:
+                link_tag = find_tag(row, 'a')
+                link = link_tag['href']
+                break
+        link = urljoin(PEP, link)
+        response = get_response(session, link)
+        soup = BeautifulSoup(response.text, features='lxml')
+        dl = find_tag(soup, 'dl', attrs={'class': 'rfc2822 field-list simple'})
+        pattern = (
+                r'.*(?P<status>Active|Draft|Final|Provisional|Rejected|'
+                r'Superseded|Withdrawn|Deferred|April Fool!|Accepted)'
             )
-            card_status = (
-                packet_info.find(text=re.compile('Status.*'))
-                .parent.find_next_sibling()
-                .text
+        re_text = re.search(pattern, dl.text)
+        status = None
+        if re_text:
+            status = re_text.group('status')
+        if all_status and EXPECTED_STATUS.get(all_status) != status:
+            logging.info(
+                f'Несовпадающие статусы:\n{link}\n'
+                f'Статус в карточке: {status}\n'
+                f'Ожидаемый статус: {EXPECTED_STATUS[all_status]}'
             )
-            expected = EXPECTED_STATUS.get(main_table_status)
-            if card_status not in expected:
-                logs.append(
-                    INCONGRUITY_STATUSES_FORMAT.format(
-                        packet_url=packet_url,
-                        card_status=card_status,
-                        expected=expected,
-                    )
-                )
-            packet_status = (
-                packet_info.find(text=re.compile('Status.*'))
-                .parent.find_next_sibling()
-                .text
+        if not all_status and status not in ('Active', 'Draft'):
+            logging.info(
+                f'Несовпадающие статусы:\n{link}\n'
+                f'Статус в карточке: {status}\n'
+                f'Ожидаемые статусы: ["Active", "Draft"]'
             )
-            status_sum[packet_status] += 1
-        except ConnectionError as error:
-            logs.append(error)
-    for log in logs:
-        logging.info(log)
-    return [
-        ('Статус', 'Количество'),
-        *status_sum.items(),
-        ('Итого', sum(status_sum.values())),
-    ]
+        status_sum[status] += 1
+    result.extend(status_sum.items())
+    result.append(('Total', sum(status_sum.values())))
+    return result
 
 
 MODE_TO_FUNCTION = {
