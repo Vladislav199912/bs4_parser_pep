@@ -9,7 +9,7 @@ from configs import configure_argument_parser, configure_logging
 from constants import (BASE_DIR, EXPECTED_STATUS, LATEST_VERSIONS_RESULT_TABLE,
                        MAIN_DOC_URL, PEP, WHATS_NEW_RESULT_TABLE,
                        DOWNLOADS_DIR, DOWNLOADS_URL,
-                       DOWNLOAD_COMPLETE_FORMAT, PEP_TABLE)
+                       DOWNLOAD_COMPLETE_FORMAT)
 from outputs import control_output
 from tqdm import tqdm
 from utils import find_tag, get_response
@@ -103,49 +103,38 @@ def download(session):
 
 
 def pep(session):
-    response = get_response(session, PEP_TABLE)
+    response = get_response(session, PEP)
     result = [('Статус', 'Количество')]
     soup = BeautifulSoup(response.text, features='lxml')
     all_tables = soup.find('section', id='numerical-index')
     all_tables = all_tables.find_all('tr')
     status_sum = defaultdict()
+    error_messages = []
     for table in tqdm(all_tables, desc='Parsing'):
-        rows = table.find_all('td')
-        all_status = None
+        preview_status_column = find_tag(table, 'td')
+        preview_status = preview_status_column.text[1:]
         link = None
-        for i, row in enumerate(rows):
-            if i == 0 and len(row.text) == 2:
-                all_status = row.text[1]
-                continue
-            if i == 1:
-                link_tag = find_tag(row, 'a')
-                link = link_tag['href']
-                break
         link = urljoin(PEP, link)
         response = get_response(session, link)
         soup = BeautifulSoup(response.text, features='lxml')
-        dl = find_tag(soup, 'dl', attrs={'class': 'rfc2822 field-list simple'})
-        pattern = (
-                r'.*(?P<status>Active|Draft|Final|Provisional|Rejected|'
-                r'Superseded|Withdrawn|Deferred|April Fool!|Accepted)'
-            )
-        re_text = re.search(pattern, dl.text)
+        section = find_tag(soup, 'section', {'id': 'pep-content'})
+        table = find_tag(section, 'dl', {'class': 'field-list'})
+        re_text = re.search(table.text)
         status = None
         if re_text:
             status = re_text.group('status')
-        if all_status and EXPECTED_STATUS.get(all_status) != status:
-            logging.info(
-                f'Несовпадающие статусы:\n{link}\n'
-                f'Статус в карточке: {status}\n'
-                f'Ожидаемый статус: {EXPECTED_STATUS[all_status]}'
-            )
-        if not all_status and status not in ('Active', 'Draft'):
-            logging.info(
-                f'Несовпадающие статусы:\n{link}\n'
-                f'Статус в карточке: {status}\n'
-                f'Ожидаемые статусы: ["Active", "Draft"]'
-            )
-        status_sum[status] += 1
+        if preview_status and EXPECTED_STATUS.get(preview_status) != status:
+            error_message = (
+                'Несовпадающие статусы:\n'
+                f'{link}\n'
+                f'Статус в картрочке {status}\n'
+                f'Ожидаемые статусы: {EXPECTED_STATUS[preview_status]}')
+            error_messages.append(error_message)
+
+    if error_messages:
+        error_log = '\n'.join(error_messages)
+        logging.warning(error_log)
+    status_sum[status] += 1
     result.extend(status_sum.items())
     result.append(('Total', sum(status_sum.values())))
     return result
