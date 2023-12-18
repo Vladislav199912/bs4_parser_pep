@@ -113,14 +113,14 @@ def pep(session):
     for table in tqdm(all_tables, desc='Parsing'):
         preview_status_column = find_tag(table, 'td')
         preview_status = preview_status_column.text[1:]
-        link = None
-        link = urljoin(PEP, link)
+        link = urljoin(PEP, find_tag(table, 'a')['href'])
         response = get_response(session, link)
         soup = BeautifulSoup(response.text, features='lxml')
         section = find_tag(soup, 'section', {'id': 'pep-content'})
         table = find_tag(section, 'dl', {'class': 'field-list'})
         re_text = re.search(table.text)
         status = None
+        status_sum[status] += 1
         if re_text:
             status = re_text.group('status')
         if preview_status and EXPECTED_STATUS.get(preview_status) != status:
@@ -134,7 +134,6 @@ def pep(session):
     if error_messages:
         error_log = '\n'.join(error_messages)
         logging.warning(error_log)
-    status_sum[status] += 1
     result.extend(status_sum.items())
     result.append(('Total', sum(status_sum.values())))
     return result
